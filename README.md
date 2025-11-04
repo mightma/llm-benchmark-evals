@@ -93,7 +93,36 @@ python main.py evaluate \
   --max-tokens 1024
 ```
 
-#### 3. Compare Models
+#### 3. Multiple Responses (Self-Consistency)
+```bash
+# Generate multiple responses per question for improved accuracy
+python main.py evaluate \
+  --benchmark aime25 \
+  --num-responses 5 \
+  --temperature 0.7
+
+# Useful for mathematical problems and reasoning tasks
+python main.py evaluate \
+  --benchmark mmlu_pro \
+  --num-responses 3 \
+  --num-samples 100
+```
+
+#### 4. Concurrent Processing
+```bash
+# Use concurrent requests for faster evaluation (default: 4 concurrent)
+python main.py evaluate \
+  --benchmark mmlu_pro \
+  --max-concurrent 8 \
+  --num-samples 100
+
+# Sequential processing (useful for debugging or rate-limited servers)
+python main.py evaluate \
+  --benchmark ifeval \
+  --max-concurrent 1
+```
+
+#### 5. Compare Models
 ```bash
 # Compare results from multiple evaluation runs
 python main.py compare results/model1_results.json results/model2_results.json
@@ -106,7 +135,7 @@ python main.py compare \
   --output comparison.xlsx
 ```
 
-#### 4. Server Management
+#### 6. Server Management
 ```bash
 # Check server status
 python main.py server-status
@@ -133,13 +162,13 @@ vllm_server:
 
 #### Custom Data Paths
 
-Place your benchmark data in the specified directories:
+The framework will automatically download benchmark data from HuggingFace when needed. You can also place local data in the specified directories:
 
 ```
 data/
-├── mmlu_pro/          # MMLU-Pro data files
-├── aime25/            # AIME25 problems
-└── ifeval/            # IFEval data
+├── mmlu_pro/          # MMLU-Pro data files (optional - auto-downloads from HuggingFace)
+├── aime25/            # AIME25 problems (optional - auto-downloads from HuggingFace math-ai/aime25)
+└── ifeval/            # IFEval data (optional - auto-downloads from HuggingFace)
 ```
 
 #### Batch Evaluation
@@ -157,6 +186,79 @@ for temp in 0.1 0.3 0.7; do
 done
 ```
 
+## Advanced Features
+
+### Multiple Responses (Self-Consistency)
+
+The framework supports generating multiple responses per question to improve accuracy through self-consistency:
+
+#### How It Works
+1. **Multiple Generation**: Generate N responses for each question (default: 1)
+2. **Individual Evaluation**: Each response is evaluated independently
+3. **Majority Voting**: If multiple responses are correct, use majority voting on predicted answers
+4. **Best Response Selection**: Select the most frequent correct answer as the final result
+
+#### Benefits
+- **Improved Accuracy**: Especially effective for mathematical and reasoning problems
+- **Reduced Variance**: Multiple samples help avoid single bad generations
+- **Statistical Confidence**: Provides insights into model consistency
+
+#### Usage Examples
+```bash
+# Generate 5 responses per AIME problem
+python main.py evaluate --benchmark aime25 --num-responses 5
+
+# Self-consistency for MMLU-Pro with temperature sampling
+python main.py evaluate --benchmark mmlu_pro --num-responses 3 --temperature 0.7
+```
+
+#### Output Format
+Results include additional metadata for multiple responses:
+- `majority_vote_count`: Number of responses that agreed with the final answer
+- `total_responses`: Total number of responses generated
+- `correct_responses`: Number of responses that were individually correct
+- `all_responses`: Full list of generated responses (in prediction files)
+
+### Concurrent Processing
+
+The framework supports concurrent processing to significantly speed up evaluations by making multiple VLLM server requests in parallel.
+
+#### How It Works
+1. **Semaphore Control**: Uses asyncio.Semaphore to limit concurrent requests
+2. **Parallel Sample Processing**: Multiple samples processed simultaneously
+3. **Nested Concurrency**: When using multiple responses, those are also generated concurrently
+4. **Order Preservation**: Results maintain original sample order regardless of completion timing
+
+#### Benefits
+- **Significant Speed Improvement**: 2-4x faster evaluation times
+- **Configurable Concurrency**: Adjust based on server capacity and rate limits
+- **Resource Efficient**: Optimal utilization of VLLM server capacity
+- **Error Isolation**: Individual sample failures don't affect other concurrent requests
+
+#### Configuration Options
+```yaml
+evaluation:
+  max_concurrent: 4  # Number of concurrent requests (default: 4)
+```
+
+#### Performance Considerations
+- **VLLM Server Capacity**: Higher concurrency requires more server resources
+- **Rate Limiting**: Some servers may have rate limits requiring lower concurrency
+- **Memory Usage**: More concurrent requests use more memory
+- **Network Latency**: High-latency connections benefit more from concurrency
+
+#### Usage Examples
+```bash
+# High-performance evaluation with 8 concurrent requests
+python main.py evaluate --max-concurrent 8 --benchmark mmlu_pro
+
+# Conservative approach for rate-limited servers
+python main.py evaluate --max-concurrent 2 --benchmark aime25
+
+# Sequential processing for debugging
+python main.py evaluate --max-concurrent 1 --benchmark ifeval
+```
+
 ## Benchmark Details
 
 ### MMLU-Pro
@@ -168,14 +270,14 @@ done
 ### AIME25
 - **Description**: American Invitational Mathematics Examination 2025 problems
 - **Metric**: Exact match accuracy
-- **Data**: JSON file with mathematical problems
+- **Data**: Auto-loads from HuggingFace `math-ai/aime25` dataset (30 problems) or local JSON files
 - **Format**: Integer answers (000-999)
 
 ### IFEval
 - **Description**: Instruction-following evaluation with specific formatting requirements
 - **Metric**: Instruction compliance rate
-- **Data**: Loads from HuggingFace or local JSON files
-- **Format**: Various instruction types
+- **Data**: Auto-loads from HuggingFace `google/IFEval` dataset (541 samples) or local JSON files
+- **Format**: Complete coverage of all 25 instruction types from the original Google IFEval benchmark
 
 ## Output Files
 

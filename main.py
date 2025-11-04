@@ -54,6 +54,8 @@ def cli(ctx, config, verbose):
 @click.option('--model', '-m', help='Model name to use (overrides config)')
 @click.option('--benchmark', '-b', help='Specific benchmark to run (mmlu_pro, aime25, ifeval)')
 @click.option('--num-samples', '-n', type=int, help='Number of samples to evaluate')
+@click.option('--num-responses', type=int, default=1, help='Number of responses to generate per question (for self-consistency)')
+@click.option('--max-concurrent', type=int, help='Maximum number of concurrent requests (overrides config)')
 @click.option('--temperature', '-t', type=float, help='Temperature for generation')
 @click.option('--top-p', type=float, help='Top-p for nucleus sampling')
 @click.option('--top-k', type=int, help='Top-k for sampling')
@@ -61,7 +63,7 @@ def cli(ctx, config, verbose):
 @click.option('--output-dir', '-o', default='results', help='Output directory for results')
 @click.option('--run-id', help='Custom run ID for saving results')
 @click.pass_context
-def evaluate(ctx, model, benchmark, num_samples, temperature, top_p, top_k, max_tokens, output_dir, run_id):
+def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, temperature, top_p, top_k, max_tokens, output_dir, run_id):
     """Run evaluation on specified benchmarks."""
 
     async def run_evaluation():
@@ -73,6 +75,14 @@ def evaluate(ctx, model, benchmark, num_samples, temperature, top_p, top_k, max_
 
         # Initialize runner
         runner = EvaluationRunner(config_path)
+
+        # Override max_concurrent if provided
+        if max_concurrent is not None:
+            if "evaluation" not in runner.config:
+                runner.config["evaluation"] = {}
+            runner.config["evaluation"]["max_concurrent"] = max_concurrent
+            # Reinitialize benchmarks with updated config
+            runner._initialize_benchmarks()
 
         # Get model name
         if not model:
@@ -119,6 +129,7 @@ def evaluate(ctx, model, benchmark, num_samples, temperature, top_p, top_k, max_
                         benchmark_name=benchmark,
                         model_name=model_name,
                         num_samples=num_samples,
+                        num_responses=num_responses,
                         **inference_params
                     )]
                     progress.remove_task(eval_task)
@@ -128,6 +139,7 @@ def evaluate(ctx, model, benchmark, num_samples, temperature, top_p, top_k, max_
                     results = await runner.run_all_benchmarks(
                         model_name=model_name,
                         num_samples=num_samples,
+                        num_responses=num_responses,
                         **inference_params
                     )
                     progress.remove_task(eval_task)

@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import json
 import os
 import logging
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -61,11 +62,83 @@ class BaseBenchmark(ABC):
         """Aggregate results from all samples."""
         pass
 
+    def _combine_responses(
+        self,
+        sample: EvaluationSample,
+        responses: List[str],
+        eval_results: List[Dict[str, Any]]
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        Combine multiple responses for a single sample.
+        Default implementation uses majority voting for correct answers.
+        Subclasses can override for custom combination strategies.
+
+        Returns:
+            Tuple of (final_evaluation_result, best_response)
+        """
+        if not responses or not eval_results:
+            return {"correct": False, "score": 0.0, "error": "No responses"}, ""
+
+        # Count correct responses
+        correct_results = [result for result in eval_results if result.get("correct", False)]
+        correct_count = len(correct_results)
+
+        if correct_count == 0:
+            # No correct responses - return the first one
+            return eval_results[0], responses[0]
+        elif correct_count == 1:
+            # One correct response - use it
+            correct_idx = next(i for i, result in enumerate(eval_results) if result.get("correct", False))
+            return eval_results[correct_idx], responses[correct_idx]
+        else:
+            # Multiple correct responses - use majority voting on predicted answers
+            return self._majority_vote_responses(sample, responses, eval_results)
+
+    def _majority_vote_responses(
+        self,
+        sample: EvaluationSample,
+        responses: List[str],
+        eval_results: List[Dict[str, Any]]
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        Use majority voting to select the best response.
+        """
+        from collections import Counter
+
+        # Count predicted answers
+        predicted_answers = []
+        for result in eval_results:
+            if result.get("correct", False):
+                predicted_answers.append(result.get("predicted", ""))
+
+        if not predicted_answers:
+            # No correct predictions - return first response
+            return eval_results[0], responses[0]
+
+        # Find most common correct answer
+        answer_counts = Counter(predicted_answers)
+        most_common_answer = answer_counts.most_common(1)[0][0]
+
+        # Find the first response that gave this answer
+        for i, result in enumerate(eval_results):
+            if result.get("predicted") == most_common_answer and result.get("correct", False):
+                # Enhance the result with majority voting info
+                enhanced_result = result.copy()
+                enhanced_result["majority_vote_count"] = answer_counts[most_common_answer]
+                enhanced_result["total_responses"] = len(responses)
+                enhanced_result["correct_responses"] = len([r for r in eval_results if r.get("correct", False)])
+                return enhanced_result, responses[i]
+
+        # Fallback - return first correct response
+        correct_idx = next(i for i, result in enumerate(eval_results) if result.get("correct", False))
+        return eval_results[correct_idx], responses[correct_idx]
+
     async def run_evaluation(
         self,
         inference_client,
         model_name: str,
         num_samples: Optional[int] = None,
+        num_responses: int = 1,
         save_predictions: bool = True,
         output_dir: str = "results"
     ) -> EvaluationResult:
@@ -79,55 +152,137 @@ class BaseBenchmark(ABC):
 
         logger.info(f"Evaluating {len(samples)} samples")
 
-        # Run inference and evaluation
-        sample_results = []
+        # Get concurrency settings from config
+        max_concurrent = self.config.get("max_concurrent", 4)
+
+        # Create semaphore for concurrency control
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        logger.info(f"Using {max_concurrent} concurrent workers for evaluation")
+
+        # Run inference and evaluation concurrently
+        async def process_sample(i: int, sample: EvaluationSample) -> Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]:
+            """Process a single sample with concurrency control."""
+            async with semaphore:
+                logger.info(f"Processing sample {i+1}/{len(samples)}: {sample.id}")
+
+                try:
+                    # Generate multiple responses for this sample
+                    responses = []
+                    eval_results = []
+
+                    # Generate responses (can be done concurrently for multiple responses)
+                    if num_responses == 1:
+                        # Single response
+                        response = await inference_client.generate(
+                            prompt=sample.input_text,
+                            model_name=model_name
+                        )
+                        model_output = response["choices"][0]["message"]["content"]
+                        responses.append(model_output)
+
+                        eval_result = await self.evaluate_sample(sample, model_output)
+                        eval_results.append(eval_result)
+                    else:
+                        # Multiple responses - generate concurrently
+                        async def generate_single_response(response_idx: int):
+                            logger.debug(f"Generating response {response_idx+1}/{num_responses} for sample {sample.id}")
+                            response = await inference_client.generate(
+                                prompt=sample.input_text,
+                                model_name=model_name
+                            )
+                            model_output = response["choices"][0]["message"]["content"]
+                            eval_result = await self.evaluate_sample(sample, model_output)
+                            return model_output, eval_result
+
+                        # Generate multiple responses concurrently
+                        response_tasks = [generate_single_response(idx) for idx in range(num_responses)]
+                        response_results = await asyncio.gather(*response_tasks)
+
+                        responses = [result[0] for result in response_results]
+                        eval_results = [result[1] for result in response_results]
+
+                    # Combine multiple responses using the appropriate strategy
+                    if num_responses == 1:
+                        # Single response - use as-is
+                        final_eval_result = eval_results[0]
+                        best_response = responses[0]
+                    else:
+                        # Multiple responses - use majority voting or best response
+                        final_eval_result, best_response = self._combine_responses(
+                            sample, responses, eval_results
+                        )
+
+                    # Create prediction data for saving
+                    prediction_data = None
+                    if save_predictions:
+                        prediction_data = {
+                            "id": sample.id,
+                            "input": sample.input_text,
+                            "expected": sample.expected_output,
+                            "predicted": best_response,
+                            "evaluation": final_eval_result,
+                            "metadata": sample.metadata
+                        }
+
+                        # Add all responses if multiple were generated
+                        if num_responses > 1:
+                            prediction_data["all_responses"] = responses
+                            prediction_data["all_evaluations"] = eval_results
+                            prediction_data["num_responses"] = num_responses
+
+                    return i, final_eval_result, prediction_data
+
+                except Exception as e:
+                    error_msg = f"Error processing sample {sample.id}: {e}"
+                    logger.error(error_msg)
+
+                    # Add more specific error context for HTTP errors
+                    if "HTTP" in str(e) or "Connection" in str(e) or "Timeout" in str(e):
+                        logger.error(f"Network/HTTP error details: {type(e).__name__}: {e}")
+                        error_type = "network_error"
+                    else:
+                        error_type = "processing_error"
+
+                    # Return failed sample result
+                    failed_result = {
+                        "correct": False,
+                        "error": str(e),
+                        "error_type": error_type,
+                        "score": 0.0
+                    }
+                    return i, failed_result, None
+
+        # Process all samples concurrently
+        logger.info("Starting concurrent processing...")
+        tasks = [process_sample(i, sample) for i, sample in enumerate(samples)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results and maintain order
+        sample_results = [None] * len(samples)
         predictions = []
 
-        for i, sample in enumerate(samples):
-            logger.info(f"Processing sample {i+1}/{len(samples)}")
-
-            try:
-                # Get model response
-                response = await inference_client.generate(
-                    prompt=sample.input_text,
-                    model_name=model_name
-                )
-
-                model_output = response["choices"][0]["message"]["content"]
-
-                # Evaluate the response
-                eval_result = await self.evaluate_sample(sample, model_output)
-                sample_results.append(eval_result)
-
-                # Store prediction for saving
-                if save_predictions:
-                    predictions.append({
-                        "id": sample.id,
-                        "input": sample.input_text,
-                        "expected": sample.expected_output,
-                        "predicted": model_output,
-                        "evaluation": eval_result,
-                        "metadata": sample.metadata
-                    })
-
-            except Exception as e:
-                error_msg = f"Error processing sample {sample.id}: {e}"
-                logger.error(error_msg)
-
-                # Add more specific error context for HTTP errors
-                if "HTTP" in str(e) or "Connection" in str(e) or "Timeout" in str(e):
-                    logger.error(f"Network/HTTP error details: {type(e).__name__}: {e}")
-                    error_type = "network_error"
-                else:
-                    error_type = "processing_error"
-
-                # Add failed sample result
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Task failed with exception: {result}")
+                # Add a default failed result
                 sample_results.append({
                     "correct": False,
-                    "error": str(e),
-                    "error_type": error_type,
+                    "error": str(result),
+                    "error_type": "task_error",
                     "score": 0.0
                 })
+            else:
+                index, eval_result, prediction_data = result
+                sample_results[index] = eval_result
+
+                if prediction_data:
+                    predictions.append(prediction_data)
+
+        # Filter out None results (shouldn't happen, but be safe)
+        sample_results = [r for r in sample_results if r is not None]
+
+        logger.info(f"Completed processing {len(sample_results)} samples")
 
         # Aggregate results
         aggregated = self.aggregate_results(sample_results)

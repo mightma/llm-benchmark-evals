@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any
 import psutil
 import signal
 import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ class VLLMServerManager:
         self.model_config = config.get("models", [{}])[0]  # Use first model by default
         self.process: Optional[subprocess.Popen] = None
         self.server_url = None
+        self.stdout_file = None
+        self.stderr_file = None
+        self.stdout_log_path = None
+        self.stderr_log_path = None
 
     async def start_server(self) -> str:
         """Start VLLM server if configured to deploy locally."""
@@ -53,14 +58,19 @@ class VLLMServerManager:
         cmd = self._build_vllm_command(host, port)
         logger.info(f"VLLM command: {' '.join(cmd)}")
 
+        # Setup logging
+        self._setup_logging()
+
         # Start the server process
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=self.stdout_file,
+            stderr=self.stderr_file,
             text=True,
             preexec_fn=os.setsid  # Create new process group
         )
+
+        logger.info(f"VLLM server logs: stdout={self.stdout_log_path}, stderr={self.stderr_log_path}")
 
         # Wait for server to be ready
         await self._wait_for_server_ready()
@@ -86,29 +96,97 @@ class VLLMServerManager:
 
         if quantization := self.model_config.get("quantization"):
             cmd.extend(["--quantization", quantization])
+        
+        if tensor_parallel_size := self.model_config.get("tensor_parallel_size"):
+            cmd.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+        
+        if enable_expert_parallel := self.model_config.get("enable_expert_parallel"):
+            cmd.append("--enable-expert-parallel")
 
         # Add trust remote code flag for most models
         cmd.append("--trust-remote-code")
 
         return cmd
 
+    def _setup_logging(self):
+        """Setup logging for VLLM server output."""
+        # Create logs directory if it doesn't exist
+        logs_dir = "logs"
+        os.makedirs(logs_dir, exist_ok=True)
+
+        # Create log file paths with timestamps
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_name = self.model_config.get("name", "unknown_model").replace("/", "_").replace(":", "_")
+
+        self.stdout_log_path = os.path.join(logs_dir, f"vllm_server_{model_name}_{timestamp}.log")
+        self.stderr_log_path = os.path.join(logs_dir, f"vllm_server_error_{model_name}_{timestamp}.log")
+
+        # Open log files
+        try:
+            self.stdout_file = open(self.stdout_log_path, 'w', encoding='utf-8', buffering=1)  # Line buffered
+            self.stderr_file = open(self.stderr_log_path, 'w', encoding='utf-8', buffering=1)  # Line buffered
+
+            # Write header to log files
+            header = f"VLLM Server Log - Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            header += f"Model: {self.model_config.get('model_path', 'unknown')}\n"
+            header += f"Server URL: {self.server_url}\n"
+            header += "=" * 80 + "\n"
+
+            self.stdout_file.write(header)
+            self.stderr_file.write(header)
+            self.stdout_file.flush()
+            self.stderr_file.flush()
+
+        except Exception as e:
+            logger.error(f"Failed to setup logging: {e}")
+            # Fallback to subprocess.PIPE if logging setup fails
+            self.stdout_file = subprocess.PIPE
+            self.stderr_file = subprocess.PIPE
+
     async def _wait_for_server_ready(self, timeout: int = 300) -> None:
-        """Wait for VLLM server to be ready."""
+        """Wait for VLLM server to be ready with log monitoring."""
         start_time = time.time()
+        last_log_check = 0
 
         while time.time() - start_time < timeout:
             if await self._test_server_connection():
+                logger.info("VLLM server is ready!")
                 return
 
             # Check if process is still running
             if self.process and self.process.poll() is not None:
-                stdout, stderr = self.process.communicate()
-                raise RuntimeError(f"VLLM server process died. STDERR: {stderr}")
+                # Process died, get recent logs for debugging
+                logs = self.get_recent_logs(20)
+                error_msg = f"VLLM server process died.\n"
+                if logs['stderr']:
+                    error_msg += f"Recent STDERR:\n{logs['stderr']}\n"
+                if logs['stdout']:
+                    error_msg += f"Recent STDOUT:\n{logs['stdout']}"
+                raise RuntimeError(error_msg)
 
-            logger.info("Waiting for VLLM server to be ready...")
+            # Show recent logs every 30 seconds
+            current_time = time.time() - start_time
+            if current_time - last_log_check >= 30:
+                logs = self.get_recent_logs(3)
+                if logs['stdout']:
+                    # Show last line of stdout for progress
+                    last_line = logs['stdout'].strip().split('\n')[-1] if logs['stdout'].strip() else ""
+                    if last_line:
+                        logger.info(f"Server progress: {last_line}")
+                last_log_check = current_time
+
+            logger.info(f"Waiting for VLLM server to be ready... ({int(current_time)}s elapsed)")
             await asyncio.sleep(5)
 
-        raise TimeoutError(f"VLLM server did not start within {timeout} seconds")
+        # Timeout reached, show recent logs
+        logs = self.get_recent_logs(10)
+        timeout_msg = f"VLLM server did not start within {timeout} seconds.\n"
+        if logs['stderr']:
+            timeout_msg += f"Recent STDERR:\n{logs['stderr']}\n"
+        if logs['stdout']:
+            timeout_msg += f"Recent STDOUT:\n{logs['stdout']}"
+
+        raise TimeoutError(timeout_msg)
 
     async def _test_server_connection(self, max_retries: int = 3) -> bool:
         """Test connection to VLLM server with retries."""
@@ -136,12 +214,58 @@ class VLLMServerManager:
 
         return False
 
+    def get_recent_logs(self, lines: int = 50) -> Dict[str, str]:
+        """Get recent log entries from VLLM server."""
+        logs = {"stdout": "", "stderr": ""}
+
+        try:
+            if self.stdout_log_path and os.path.exists(self.stdout_log_path):
+                with open(self.stdout_log_path, 'r', encoding='utf-8') as f:
+                    all_lines = f.readlines()
+                    logs["stdout"] = ''.join(all_lines[-lines:]) if all_lines else ""
+
+            if self.stderr_log_path and os.path.exists(self.stderr_log_path):
+                with open(self.stderr_log_path, 'r', encoding='utf-8') as f:
+                    all_lines = f.readlines()
+                    logs["stderr"] = ''.join(all_lines[-lines:]) if all_lines else ""
+
+        except Exception as e:
+            logger.debug(f"Error reading logs: {e}")
+
+        return logs
+
+    def show_logs(self, lines: int = 50, log_type: str = "both") -> None:
+        """Display recent logs to console."""
+        logs = self.get_recent_logs(lines)
+
+        if log_type in ["both", "stdout"] and logs["stdout"]:
+            print(f"\n📤 VLLM Server Output (last {lines} lines):")
+            print("-" * 60)
+            print(logs["stdout"])
+
+        if log_type in ["both", "stderr"] and logs["stderr"]:
+            print(f"\n❌ VLLM Server Errors (last {lines} lines):")
+            print("-" * 60)
+            print(logs["stderr"])
+
+        if not logs["stdout"] and not logs["stderr"]:
+            print(f"ℹ️  No log files found or logs are empty")
+
+        # Show log file paths
+        if self.stdout_log_path:
+            print(f"\n📄 Log files:")
+            print(f"   Stdout: {self.stdout_log_path}")
+            print(f"   Stderr: {self.stderr_log_path}")
+
     async def stop_server(self) -> None:
         """Stop the VLLM server."""
         if self.process:
             logger.info("Stopping VLLM server...")
 
             try:
+                # Close log files first
+                self._close_log_files()
+
                 # Send SIGTERM to the process group
                 os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
 
@@ -155,10 +279,31 @@ class VLLMServerManager:
                     self.process.wait()
 
                 logger.info("VLLM server stopped")
+                if self.stdout_log_path:
+                    logger.info(f"Server logs saved to: {self.stdout_log_path}")
+
             except Exception as e:
                 logger.error(f"Error stopping VLLM server: {e}")
             finally:
                 self.process = None
+                self._cleanup_logging()
+
+    def _close_log_files(self):
+        """Close log file handles."""
+        try:
+            if self.stdout_file and self.stdout_file != subprocess.PIPE:
+                self.stdout_file.flush()
+                self.stdout_file.close()
+            if self.stderr_file and self.stderr_file != subprocess.PIPE:
+                self.stderr_file.flush()
+                self.stderr_file.close()
+        except Exception as e:
+            logger.debug(f"Error closing log files: {e}")
+
+    def _cleanup_logging(self):
+        """Clean up logging resources."""
+        self.stdout_file = None
+        self.stderr_file = None
 
     def get_server_url(self) -> Optional[str]:
         """Get the server URL."""

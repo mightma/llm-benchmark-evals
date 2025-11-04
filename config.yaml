@@ -4,9 +4,11 @@
 models:
   - name: "Qwen3-30B-GPTQ-Int8"
     model_path: "QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8"
-    quantization: "gptq"
+    quantization: null  # "gptq"  # Not used, the vllm server will raise error if added. However, it will be automatically extracted from the model config file by the vllm server. Additionally, the example scritpt of starting the vllm server of this model, excludes this parameter, see: https://huggingface.co/QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8. 
     gpu_memory_utilization: 0.9
-    max_model_len: 32768
+    max_model_len: 262144
+    tensor_parallel_size: 4
+    enable_expert_parallel: true
 
 # VLLM Server settings
 vllm_server:
@@ -38,12 +40,12 @@ benchmarks:
 
   aime25:
     enabled: true
-    data_path: "data/aime25"
+    data_path: "data/aime25"  # Will auto-load from HuggingFace math-ai/aime25 if local data not found
     num_samples: null
 
   ifeval:
     enabled: true
-    data_path: "data/ifeval"
+    data_path: "data/ifeval"  # Will auto-load from HuggingFace google/IFEval if local data not found
     num_samples: null
 
 # Evaluation settings
@@ -53,6 +55,7 @@ evaluation:
   batch_size: 1
   max_concurrent: 4
   timeout: 300  # seconds per request
+  num_responses: 1  # Number of responses to generate per question (for self-consistency)
 
 # Logging
 logging:

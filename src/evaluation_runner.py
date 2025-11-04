@@ -38,27 +38,36 @@ class EvaluationRunner:
         """Initialize benchmark instances."""
         benchmark_config = self.config.get("benchmarks", {})
 
+        # Get evaluation config for concurrency settings
+        evaluation_config = self.config.get("evaluation", {})
+
         # MMLU-Pro
         if benchmark_config.get("mmlu_pro", {}).get("enabled", False):
             mmlu_config = benchmark_config["mmlu_pro"]
+            # Merge benchmark config with evaluation config
+            merged_config = {**mmlu_config, **evaluation_config}
             self.benchmarks["mmlu_pro"] = MMLUProBenchmark(
-                config=mmlu_config,
+                config=merged_config,
                 data_path=mmlu_config.get("data_path", "data/mmlu_pro")
             )
 
         # AIME25
         if benchmark_config.get("aime25", {}).get("enabled", False):
             aime_config = benchmark_config["aime25"]
+            # Merge benchmark config with evaluation config
+            merged_config = {**aime_config, **evaluation_config}
             self.benchmarks["aime25"] = AIME25Benchmark(
-                config=aime_config,
+                config=merged_config,
                 data_path=aime_config.get("data_path", "data/aime25")
             )
 
         # IFEval
         if benchmark_config.get("ifeval", {}).get("enabled", False):
             ifeval_config = benchmark_config["ifeval"]
+            # Merge benchmark config with evaluation config
+            merged_config = {**ifeval_config, **evaluation_config}
             self.benchmarks["ifeval"] = IFEvalBenchmark(
-                config=ifeval_config,
+                config=merged_config,
                 data_path=ifeval_config.get("data_path", "data/ifeval")
             )
 
@@ -85,6 +94,7 @@ class EvaluationRunner:
         benchmark_name: str,
         model_name: str,
         num_samples: Optional[int] = None,
+        num_responses: int = 1,
         **inference_params
     ) -> EvaluationResult:
         """Run a single benchmark."""
@@ -113,6 +123,7 @@ class EvaluationRunner:
                 inference_client=client_to_use,
                 model_name=model_name,
                 num_samples=num_samples,
+                num_responses=num_responses,
                 save_predictions=evaluation_config.get("save_predictions", True),
                 output_dir=evaluation_config.get("output_dir", "results")
             )
@@ -125,6 +136,7 @@ class EvaluationRunner:
         self,
         model_name: str,
         num_samples: Optional[int] = None,
+        num_responses: int = 1,
         **inference_params
     ) -> List[EvaluationResult]:
         """Run all enabled benchmarks."""
@@ -143,6 +155,7 @@ class EvaluationRunner:
                     benchmark_name=benchmark_name,
                     model_name=model_name,
                     num_samples=num_samples,
+                    num_responses=num_responses,
                     **inference_params
                 )
                 results.append(result)

@@ -10,6 +10,7 @@ import os
 import logging
 import re
 from typing import List, Dict, Any
+from datasets import load_dataset
 
 from .base import EvaluationSample, BaseBenchmark
 
@@ -26,11 +27,24 @@ class AIME25Benchmark(BaseBenchmark):
         """Load AIME25 data."""
         logger.info("Loading AIME25 dataset...")
 
+        try:
+            # Try to load from local path first
+            samples = await self._load_local_data()
+            if samples:
+                return samples
+        except Exception as e:
+            logger.warning(f"Could not load local data: {e}")
+
+        # Fall back to loading from HuggingFace
+        return await self._load_from_huggingface()
+
+    async def _load_local_data(self) -> List[EvaluationSample]:
+        """Load AIME25 data from local JSON file."""
         samples = []
 
-        # Try to load from local JSON file
         json_path = os.path.join(self.data_path, "aime25.json")
         if os.path.exists(json_path):
+            logger.info("Loading AIME25 from local file...")
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
@@ -38,13 +52,31 @@ class AIME25Benchmark(BaseBenchmark):
                 sample = self._create_sample(item)
                 samples.append(sample)
 
-        else:
-            # Create sample problems if no data file exists
-            logger.warning(f"No data file found at {json_path}. Creating sample problems.")
-            samples = self._create_sample_problems()
+            logger.info(f"Loaded {len(samples)} AIME25 problems from local file")
+            return samples
 
-        logger.info(f"Loaded {len(samples)} AIME25 problems")
-        return samples
+        return []
+
+    async def _load_from_huggingface(self) -> List[EvaluationSample]:
+        """Load AIME25 data from HuggingFace datasets."""
+        logger.info("Loading AIME25 from HuggingFace (math-ai/aime25)...")
+
+        try:
+            # Load the dataset
+            dataset = load_dataset("math-ai/aime25", split="test")
+            samples = []
+
+            for item in dataset:
+                sample = self._create_sample(item)
+                samples.append(sample)
+
+            logger.info(f"Loaded {len(samples)} AIME25 problems from HuggingFace")
+            return samples
+
+        except Exception as e:
+            logger.error(f"Failed to load AIME25 from HuggingFace: {e}")
+            logger.warning("Falling back to sample problems...")
+            return self._create_sample_problems()
 
     def _create_sample(self, item: Dict[str, Any]) -> EvaluationSample:
         """Create evaluation sample from data item."""
