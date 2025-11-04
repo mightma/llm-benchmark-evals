@@ -1,0 +1,60 @@
+# LLM Evaluation Configuration
+
+# Model settings
+models:
+  - name: "Qwen3-30B-GPTQ-Int8"
+    model_path: "QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8"
+    quantization: "gptq"
+    gpu_memory_utilization: 0.9
+    max_model_len: 32768
+
+# VLLM Server settings
+vllm_server:
+  host: "0.0.0.0"
+  port: 8000
+  deploy_locally: true  # Set to false to use external server
+  external_host: null   # Set if using external server
+  external_port: null   # Set if using external server
+
+# Inference parameters
+inference:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  max_tokens: 2048
+  repetition_penalty: 1.0
+  # HTTP request retry settings
+  max_retries: 3           # Number of retries for failed requests
+  retry_delay: 2.0         # Initial delay between retries (seconds)
+  request_timeout: 300     # Base timeout for requests (seconds)
+
+# Benchmark settings
+benchmarks:
+  mmlu_pro:
+    enabled: true
+    data_path: "data/mmlu_pro"
+    num_samples: null  # null for all samples
+    subjects: null     # null for all subjects
+
+  aime25:
+    enabled: true
+    data_path: "data/aime25"
+    num_samples: null
+
+  ifeval:
+    enabled: true
+    data_path: "data/ifeval"
+    num_samples: null
+
+# Evaluation settings
+evaluation:
+  output_dir: "results"
+  save_predictions: true
+  batch_size: 1
+  max_concurrent: 4
+  timeout: 300  # seconds per request
+
+# Logging
+logging:
+  level: "INFO"
+  file: "evaluation.log"

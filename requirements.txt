@@ -1,0 +1,36 @@
+# Core dependencies
+vllm==0.9.2
+torch
+transformers
+accelerate
+datasets
+numpy
+pandas
+tqdm
+
+# Evaluation dependencies
+scikit-learn
+nltk
+rouge-score
+bert-score
+
+# API and server dependencies
+fastapi
+uvicorn
+httpx
+aiohttp
+
+# Configuration and utilities
+pyyaml
+click
+rich
+python-dotenv
+
+# Quantization support
+# auto-gptq
+# optimum
+
+# Development and testing
+pytest
+black
+flake8

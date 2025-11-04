@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+LLM Evaluation Framework
+
+A comprehensive framework for evaluating LLMs on various benchmarks including
+MMLU-Pro, AIME25, and IFEval using VLLM for efficient inference.
+"""
+
+import asyncio
+import click
+import logging
+import os
+import sys
+import json
+from typing import Optional, Dict, Any
+from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.logging import RichHandler
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from src.evaluation_runner import EvaluationRunner, InferenceParameterManager
+from src.result_analyzer import ResultAnalyzer
+
+console = Console()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(console=console, rich_tracebacks=True)]
+)
+logger = logging.getLogger(__name__)
+
+
+@click.group()
+@click.option('--config', '-c', default='config.yaml', help='Configuration file path')
+@click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
+@click.pass_context
+def cli(ctx, config, verbose):
+    """LLM Evaluation Framework - Evaluate language models on various benchmarks."""
+    ctx.ensure_object(dict)
+    ctx.obj['config'] = config
+
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+
+
+@cli.command()
+@click.option('--model', '-m', help='Model name to use (overrides config)')
+@click.option('--benchmark', '-b', help='Specific benchmark to run (mmlu_pro, aime25, ifeval)')
+@click.option('--num-samples', '-n', type=int, help='Number of samples to evaluate')
+@click.option('--temperature', '-t', type=float, help='Temperature for generation')
+@click.option('--top-p', type=float, help='Top-p for nucleus sampling')
+@click.option('--top-k', type=int, help='Top-k for sampling')
+@click.option('--max-tokens', type=int, help='Maximum tokens to generate')
+@click.option('--output-dir', '-o', default='results', help='Output directory for results')
+@click.option('--run-id', help='Custom run ID for saving results')
+@click.pass_context
+def evaluate(ctx, model, benchmark, num_samples, temperature, top_p, top_k, max_tokens, output_dir, run_id):
+    """Run evaluation on specified benchmarks."""
+
+    async def run_evaluation():
+        config_path = ctx.obj['config']
+
+        if not os.path.exists(config_path):
+            console.print(f"[red]Configuration file not found: {config_path}[/red]")
+            return
+
+        # Initialize runner
+        runner = EvaluationRunner(config_path)
+
+        # Get model name
+        if not model:
+            models = runner.config.get('models', [])
+            if models:
+                model_name = models[0].get('name', 'default')
+            else:
+                console.print("[red]No model specified and none found in config[/red]")
+                return
+        else:
+            model_name = model
+
+        # Validate inference parameters
+        inference_params = {}
+        if temperature is not None:
+            inference_params['temperature'] = temperature
+        if top_p is not None:
+            inference_params['top_p'] = top_p
+        if top_k is not None:
+            inference_params['top_k'] = top_k
+        if max_tokens is not None:
+            inference_params['max_tokens'] = max_tokens
+
+        # Validate parameters
+        inference_params = InferenceParameterManager.validate_parameters(**inference_params)
+
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                # Start server
+                start_task = progress.add_task("Starting VLLM server...", total=None)
+                server_url = await runner.start_server()
+                progress.update(start_task, description=f"Server started at {server_url}")
+                progress.remove_task(start_task)
+
+                # Run evaluation
+                if benchmark:
+                    # Single benchmark
+                    eval_task = progress.add_task(f"Running {benchmark} evaluation...", total=None)
+                    results = [await runner.run_single_benchmark(
+                        benchmark_name=benchmark,
+                        model_name=model_name,
+                        num_samples=num_samples,
+                        **inference_params
+                    )]
+                    progress.remove_task(eval_task)
+                else:
+                    # All benchmarks
+                    eval_task = progress.add_task("Running all benchmarks...", total=None)
+                    results = await runner.run_all_benchmarks(
+                        model_name=model_name,
+                        num_samples=num_samples,
+                        **inference_params
+                    )
+                    progress.remove_task(eval_task)
+
+            # Display results
+            display_results(results)
+
+            # Save results
+            analyzer = ResultAnalyzer(output_dir)
+            results_file = analyzer.save_results(results, run_id)
+
+            # Generate and save summary
+            summary = analyzer.generate_summary_report(results)
+            summary_file = results_file.replace('.json', '_summary.json')
+            with open(summary_file, 'w') as f:
+                json.dump(summary, f, indent=2)
+
+            console.print(f"\n[green]Results saved to {results_file}[/green]")
+            console.print(f"[green]Summary saved to {summary_file}[/green]")
+
+        except Exception as e:
+            console.print(f"[red]Evaluation failed: {e}[/red]")
+            logger.exception("Evaluation error")
+        finally:
+            # Cleanup
+            try:
+                await runner.stop_server()
+            except Exception as e:
+                logger.warning(f"Error stopping server: {e}")
+
+    # Run the async function
+    asyncio.run(run_evaluation())
+
+
+@cli.command()
+@click.argument('result_files', nargs=-1, required=True)
+@click.option('--output', '-o', help='Output file for comparison report')
+@click.option('--format', 'output_format', default='table',
+              type=click.Choice(['table', 'markdown', 'csv', 'excel']),
+              help='Output format')
+@click.pass_context
+def compare(ctx, result_files, output, output_format):
+    """Compare results from multiple evaluation runs."""
+    analyzer = ResultAnalyzer()
+
+    # Load results from files
+    model_results = {}
+
+    for file_path in result_files:
+        if not os.path.exists(file_path):
+            console.print(f"[red]File not found: {file_path}[/red]")
+            continue
+
+        try:
+            results = analyzer.load_results(file_path)
+            if results:
+                model_name = results[0].model_name
+                model_results[model_name] = results
+                console.print(f"[green]Loaded results for {model_name}[/green]")
+        except Exception as e:
+            console.print(f"[red]Error loading {file_path}: {e}[/red]")
+
+    if len(model_results) < 2:
+        console.print("[red]Need at least 2 result files for comparison[/red]")
+        return
+
+    # Generate comparison
+    comparison = analyzer.compare_models(model_results, output)
+
+    # Display comparison based on format
+    if output_format == 'table':
+        display_comparison_table(comparison)
+    elif output_format in ['markdown', 'csv']:
+        table_str = analyzer.create_performance_table(model_results, output_format)
+        console.print(table_str)
+    elif output_format == 'excel' and output:
+        analyzer.export_to_excel(model_results, output)
+        console.print(f"[green]Comparison exported to {output}[/green]")
+
+    if output and output_format != 'excel':
+        console.print(f"[green]Detailed comparison saved to {output}[/green]")
+
+
+@cli.command()
+@click.pass_context
+def server_status(ctx):
+    """Check VLLM server status."""
+
+    async def check_status():
+        config_path = ctx.obj['config']
+
+        if not os.path.exists(config_path):
+            console.print(f"[red]Configuration file not found: {config_path}[/red]")
+            return
+
+        runner = EvaluationRunner(config_path)
+
+        try:
+            status = await runner.get_server_status()
+
+            console.print("[bold]VLLM Server Status:[/bold]")
+
+            # Server configuration
+            deploy_locally = status.get('deploy_locally', True)
+            console.print(f"Deployment: {'Local' if deploy_locally else 'External'}")
+            console.print(f"Expected URL: {status.get('expected_url', 'N/A')}")
+            console.print(f"Current URL: {status.get('server_url', 'N/A')}")
+
+            # Status
+            server_status = status.get('status', 'Unknown')
+            status_color = {
+                'running': 'green',
+                'not_running': 'yellow',
+                'error': 'red'
+            }.get(server_status, 'white')
+
+            console.print(f"Status: [{status_color}]{server_status.replace('_', ' ').title()}[/{status_color}]")
+
+            # Process info for local deployments
+            if deploy_locally:
+                process_running = status.get('process_running', 'Unknown')
+                console.print(f"Process Running: {process_running}")
+
+            # Models (if server is running)
+            if 'models' in status and status['status'] == 'running':
+                console.print("\n[bold]Available Models:[/bold]")
+                for model in status['models'].get('data', []):
+                    console.print(f"  - {model.get('id', 'Unknown')}")
+
+            # Error details
+            if 'error' in status:
+                console.print(f"\n[red]Error Details:[/red]")
+                console.print(f"  {status['error']}")
+
+                if server_status == 'not_running':
+                    console.print(f"\n[yellow]Tip:[/yellow] Start the server with:")
+                    console.print(f"  python main.py evaluate")
+
+        except Exception as e:
+            console.print(f"[red]Failed to get server status: {e}[/red]")
+
+    # Run the async function
+    asyncio.run(check_status())
+
+
+@cli.command()
+@click.pass_context
+def list_benchmarks(ctx):
+    """List available benchmarks."""
+    config_path = ctx.obj['config']
+
+    if not os.path.exists(config_path):
+        console.print(f"[red]Configuration file not found: {config_path}[/red]")
+        return
+
+    runner = EvaluationRunner(config_path)
+    benchmarks = runner.list_available_benchmarks()
+
+    if benchmarks:
+        console.print("[bold]Available Benchmarks:[/bold]")
+        for benchmark in benchmarks:
+            info = runner.get_benchmark_info(benchmark)
+            console.print(f"  - {benchmark}: {info.get('class', 'Unknown')}")
+    else:
+        console.print("[yellow]No benchmarks enabled in configuration[/yellow]")
+
+
+@cli.command()
+def parameters():
+    """Show available inference parameters."""
+    param_info = InferenceParameterManager.get_parameter_info()
+
+    table = Table(title="Inference Parameters")
+    table.add_column("Parameter", style="cyan")
+    table.add_column("Type", style="magenta")
+    table.add_column("Range", style="green")
+    table.add_column("Default", style="yellow")
+    table.add_column("Description")
+
+    for param, info in param_info.items():
+        range_str = f"[{info['range'][0]}, {info['range'][1]}]"
+        table.add_row(
+            param,
+            info['type'],
+            range_str,
+            str(info['default']),
+            info['description']
+        )
+
+    console.print(table)
+
+
+def display_results(results):
+    """Display evaluation results in a formatted table."""
+    table = Table(title="Evaluation Results")
+    table.add_column("Benchmark", style="cyan")
+    table.add_column("Score", style="magenta")
+    table.add_column("Samples", style="green")
+    table.add_column("Details", style="yellow")
+
+    for result in results:
+        details = []
+        if 'accuracy' in result.details:
+            details.append(f"Acc: {result.details['accuracy']:.4f}")
+        if 'correct' in result.details and 'total' in result.details:
+            details.append(f"{result.details['correct']}/{result.details['total']}")
+
+        table.add_row(
+            result.benchmark_name,
+            f"{result.score:.4f}",
+            str(result.num_samples),
+            ", ".join(details) if details else "N/A"
+        )
+
+    console.print(table)
+
+
+def display_comparison_table(comparison):
+    """Display model comparison table."""
+    console.print("[bold]Model Comparison[/bold]\n")
+
+    # Overall comparison
+    if 'overall_comparison' in comparison:
+        overall = comparison['overall_comparison']
+        console.print(f"Best Overall: {overall.get('best_overall_model', 'N/A')}")
+        console.print(f"Performance Gap: {overall.get('performance_gap', 0):.4f}\n")
+
+    # Benchmark comparison table
+    if 'benchmark_comparison' in comparison:
+        table = Table(title="Benchmark Comparison")
+        table.add_column("Benchmark", style="cyan")
+
+        # Add model columns
+        models = comparison.get('models_compared', [])
+        for model in models:
+            table.add_column(model, style="magenta")
+
+        table.add_column("Best Model", style="green")
+
+        for benchmark, data in comparison['benchmark_comparison'].items():
+            row = [benchmark]
+
+            for model in models:
+                if model in data and data[model] is not None:
+                    score = data[model]['score']
+                    row.append(f"{score:.4f}")
+                else:
+                    row.append("N/A")
+
+            row.append(data.get('best_model', 'N/A'))
+            table.add_row(*row)
+
+        console.print(table)
+
+
+if __name__ == '__main__':
+    cli()
