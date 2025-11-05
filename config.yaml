@@ -8,6 +8,7 @@ models:
     max_model_len: 262144
     tensor_parallel_size: 4
     enable_expert_parallel: true
+    presence_penalty: null  # Presence penalty for VLLM server (null = use default)
 
 # VLLM Server settings
 vllm_server:
@@ -22,8 +23,9 @@ inference:
   temperature: 0.7
   top_p: 0.8
   top_k: 20
-  max_tokens: 2048
+  max_tokens: 32768
   repetition_penalty: 1.0
+  presence_penalty: null   # Presence penalty for inference (null = use default, range: -2.0 to 2.0)
   # HTTP request retry settings
   max_retries: 3           # Number of retries for failed requests
   retry_delay: 2.0         # Initial delay between retries (seconds)

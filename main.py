@@ -60,10 +60,11 @@ def cli(ctx, config, verbose):
 @click.option('--top-p', type=float, help='Top-p for nucleus sampling')
 @click.option('--top-k', type=int, help='Top-k for sampling')
 @click.option('--max-tokens', type=int, help='Maximum tokens to generate')
+@click.option('--presence-penalty', type=float, help='Presence penalty for generation (affects repetition)')
 @click.option('--output-dir', '-o', default='results', help='Output directory for results')
 @click.option('--run-id', help='Custom run ID for saving results')
 @click.pass_context
-def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, temperature, top_p, top_k, max_tokens, output_dir, run_id):
+def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, temperature, top_p, top_k, max_tokens, presence_penalty, output_dir, run_id):
     """Run evaluation on specified benchmarks.
 
     The --model argument will override the model_path in your config file, allowing you to
@@ -122,6 +123,8 @@ def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, 
             inference_params['top_k'] = top_k
         if max_tokens is not None:
             inference_params['max_tokens'] = max_tokens
+        if presence_penalty is not None:
+            inference_params['presence_penalty'] = presence_penalty
 
         # Validate parameters
         inference_params = InferenceParameterManager.validate_parameters(**inference_params)

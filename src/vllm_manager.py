@@ -110,6 +110,9 @@ class VLLMServerManager:
         if enable_expert_parallel := self.model_config.get("enable_expert_parallel"):
             cmd.append("--enable-expert-parallel")
 
+        if presence_penalty := self.model_config.get("presence_penalty"):
+            cmd.extend(["--presence-penalty", str(presence_penalty)])
+
         # Add trust remote code flag for most models
         cmd.append("--trust-remote-code")
 
@@ -394,6 +397,7 @@ class VLLMInferenceClient:
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         max_tokens: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
         max_retries: Optional[int] = None,
         retry_delay: Optional[float] = None,
         **kwargs
@@ -428,6 +432,12 @@ class VLLMInferenceClient:
         # Add top_k if specified (not all models support it)
         if top_k is not None or self.inference_config.get("top_k", -1) > 0:
             params["top_k"] = top_k if top_k is not None else self.inference_config.get("top_k")
+
+        # Add presence_penalty if specified
+        if presence_penalty is not None:
+            params["presence_penalty"] = presence_penalty
+        elif "presence_penalty" in self.inference_config:
+            params["presence_penalty"] = self.inference_config["presence_penalty"]
 
         # Add any additional parameters
         for key, value in kwargs.items():

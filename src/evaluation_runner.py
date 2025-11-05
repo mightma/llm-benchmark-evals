@@ -302,6 +302,14 @@ class InferenceParameterManager:
             else:
                 logger.warning(f"Repetition penalty {rep_penalty} invalid (must be > 0), ignoring")
 
+        # Presence penalty
+        if "presence_penalty" in params:
+            presence_penalty = float(params["presence_penalty"])
+            if -2.0 <= presence_penalty <= 2.0:
+                valid_params["presence_penalty"] = presence_penalty
+            else:
+                logger.warning(f"Presence penalty {presence_penalty} out of range [-2.0, 2.0], ignoring")
+
         return valid_params
 
     @staticmethod
@@ -337,5 +345,11 @@ class InferenceParameterManager:
                 "range": [0.0, "inf"],
                 "default": 1.0,
                 "description": "Penalty for repeating tokens. 1.0 = no penalty, > 1.0 = discourage repetition"
+            },
+            "presence_penalty": {
+                "type": "float",
+                "range": [-2.0, 2.0],
+                "default": 0.0,
+                "description": "Penalty for token presence. Positive values discourage repetition, negative values encourage it"
             }
         }
