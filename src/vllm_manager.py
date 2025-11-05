@@ -52,7 +52,12 @@ class VLLMServerManager:
         port = self.vllm_config.get("port", 8000)
         self.server_url = f"http://{host}:{port}"
 
-        logger.info(f"Starting VLLM server for model: {self.model_config.get('model_path')}")
+        model = self.model_config.get('model') or self.model_config.get('model_path')  # Support legacy config
+        if not model:
+            raise ValueError("Model configuration missing 'model' field")
+
+        logger.info(f"Starting VLLM server for model: {model}")
+        logger.info(f"Model will be accessible as: {model}")
 
         # Build VLLM command
         cmd = self._build_vllm_command(host, port)
@@ -80,9 +85,11 @@ class VLLMServerManager:
 
     def _build_vllm_command(self, host: str, port: int) -> list:
         """Build VLLM server command."""
+        model = self.model_config.get('model') or self.model_config.get('model_path')  # Support legacy config
+
         cmd = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", self.model_config.get("model_path"),
+            "--model", model,
             "--host", host,
             "--port", str(port),
         ]
@@ -116,10 +123,11 @@ class VLLMServerManager:
 
         # Create log file paths with timestamps
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = self.model_config.get("name", "unknown_model").replace("/", "_").replace(":", "_")
+        model = self.model_config.get('model') or self.model_config.get('model_path') or 'unknown_model'
+        safe_model_name = model.replace("/", "_").replace(":", "_").replace("\\", "_")
 
-        self.stdout_log_path = os.path.join(logs_dir, f"vllm_server_{model_name}_{timestamp}.log")
-        self.stderr_log_path = os.path.join(logs_dir, f"vllm_server_error_{model_name}_{timestamp}.log")
+        self.stdout_log_path = os.path.join(logs_dir, f"vllm_server_{safe_model_name}_{timestamp}.log")
+        self.stderr_log_path = os.path.join(logs_dir, f"vllm_server_error_{safe_model_name}_{timestamp}.log")
 
         # Open log files
         try:
@@ -127,8 +135,9 @@ class VLLMServerManager:
             self.stderr_file = open(self.stderr_log_path, 'w', encoding='utf-8', buffering=1)  # Line buffered
 
             # Write header to log files
+            model = self.model_config.get('model') or self.model_config.get('model_path') or 'unknown'
             header = f"VLLM Server Log - Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            header += f"Model: {self.model_config.get('model_path', 'unknown')}\n"
+            header += f"Model: {model}\n"
             header += f"Server URL: {self.server_url}\n"
             header += "=" * 80 + "\n"
 
@@ -366,11 +375,16 @@ class VLLMInferenceClient:
     def __init__(self, server_url: str, config: Dict[str, Any]):
         self.server_url = server_url
         self.inference_config = config.get("inference", {})
+        self.model_config = config.get("models", [{}])[0]  # Get model config for consistent naming
         # Get retry configuration from config
         self.max_retries = self.inference_config.get("max_retries", 3)
         self.retry_delay = self.inference_config.get("retry_delay", 2.0)
         self.request_timeout = self.inference_config.get("request_timeout", 300.0)
         self.client = httpx.AsyncClient(timeout=self.request_timeout)
+
+    def get_server_model_name(self) -> str:
+        """Get the model name as registered with the VLLM server."""
+        return self.model_config.get('model') or self.model_config.get('model_path') or "default"
 
     async def generate(
         self,
@@ -389,8 +403,22 @@ class VLLMInferenceClient:
         max_retries = max_retries if max_retries is not None else self.max_retries
         retry_delay = retry_delay if retry_delay is not None else self.retry_delay
 
+        # CRITICAL: Use the exact same model identifier as used for server startup
+        # VLLM server registers models with the exact name used in --model parameter
+        configured_model = self.model_config.get('model') or self.model_config.get('model_path')
+
+        # Always use the configured model (server startup name), ignore passed model_name
+        # This prevents "model does not exist" errors due to name mismatches
+        if configured_model:
+            effective_model = configured_model
+            if model_name and model_name != configured_model:
+                logger.debug(f"Using server model '{configured_model}' instead of requested '{model_name}' to ensure consistency")
+        else:
+            effective_model = model_name or "default"
+            logger.warning(f"No configured model found, using: {effective_model}")
+
         params = {
-            "model": model_name or "default",
+            "model": effective_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature if temperature is not None else self.inference_config.get("temperature", 0.0),
             "top_p": top_p if top_p is not None else self.inference_config.get("top_p", 1.0),

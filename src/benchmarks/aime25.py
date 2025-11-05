@@ -189,23 +189,46 @@ Your response should end with "The answer is: [your answer]" where [your answer]
         }
 
     def aggregate_results(self, sample_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate AIME results."""
+        """Aggregate AIME results, excluding inference failures."""
         total_samples = len(sample_results)
-        correct_samples = sum(1 for r in sample_results if r.get("correct", False))
 
-        accuracy = correct_samples / total_samples if total_samples > 0 else 0.0
+        # Separate successful and failed samples
+        successful_samples = [r for r in sample_results if not r.get("error")]
+        failed_samples = [r for r in sample_results if r.get("error")]
 
-        # Calculate average score (same as accuracy for AIME)
-        total_score = sum(r.get("score", 0.0) for r in sample_results)
-        avg_score = total_score / total_samples if total_samples > 0 else 0.0
+        successful_count = len(successful_samples)
+        failed_count = len(failed_samples)
+
+        # Count correct among successful samples
+        correct_samples = sum(1 for r in successful_samples if r.get("correct", False))
+        accuracy = correct_samples / successful_count if successful_count > 0 else 0.0
+
+        # Calculate average score among successful samples
+        total_score = sum(r.get("score", 0.0) for r in successful_samples)
+        avg_score = total_score / successful_count if successful_count > 0 else 0.0
+
+        # Categorize failure types
+        failure_types = {}
+        for failed in failed_samples:
+            error_type = failed.get("error_type", "unknown_error")
+            failure_types[error_type] = failure_types.get(error_type, 0) + 1
 
         return {
             "overall_score": accuracy,
-            "accuracy": accuracy,
-            "average_score": avg_score,
+            "accuracy": accuracy,  # Among successful samples
+            "average_score": avg_score,  # Among successful samples
             "correct": correct_samples,
-            "total": total_samples,
-            "error_rate": 1.0 - accuracy,
+            "successful_samples": successful_count,
+            "failed_samples": failed_count,
+            "total_samples": total_samples,
+            "success_rate": successful_count / total_samples if total_samples > 0 else 0.0,
+            "failure_rate": failed_count / total_samples if total_samples > 0 else 0.0,
+            "error_rate": 1.0 - accuracy,  # Among successful samples
+            "failure_types": failure_types,
             "problems_solved": correct_samples,
-            "problems_attempted": total_samples
+            "problems_attempted_successfully": successful_count,
+            "problems_failed": failed_count,
+            "total_problems_attempted": total_samples,
+            # Legacy field for compatibility
+            "total": successful_count
         }

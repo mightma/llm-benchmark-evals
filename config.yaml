@@ -2,9 +2,8 @@
 
 # Model settings
 models:
-  - name: "Qwen3-30B-GPTQ-Int8"
-    model_path: "QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8"
-    quantization: null  # "gptq"  # Not used, the vllm server will raise error if added. However, it will be automatically extracted from the model config file by the vllm server. Additionally, the example scritpt of starting the vllm server of this model, excludes this parameter, see: https://huggingface.co/QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8. 
+  - model: "QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8"  # HuggingFace model ID or local path - used for both server startup and inference calls
+    quantization: null  # "gptq"  # Not used, the vllm server will raise error if added. However, it will be automatically extracted from the model config file by the vllm server. Additionally, the example scritpt of starting the vllm server of this model, excludes this parameter, see: https://huggingface.co/QuantTrio/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int8.
     gpu_memory_utilization: 0.9
     max_model_len: 262144
     tensor_parallel_size: 4

@@ -62,76 +62,6 @@ class BaseBenchmark(ABC):
         """Aggregate results from all samples."""
         pass
 
-    def _combine_responses(
-        self,
-        sample: EvaluationSample,
-        responses: List[str],
-        eval_results: List[Dict[str, Any]]
-    ) -> Tuple[Dict[str, Any], str]:
-        """
-        Combine multiple responses for a single sample.
-        Default implementation uses majority voting for correct answers.
-        Subclasses can override for custom combination strategies.
-
-        Returns:
-            Tuple of (final_evaluation_result, best_response)
-        """
-        if not responses or not eval_results:
-            return {"correct": False, "score": 0.0, "error": "No responses"}, ""
-
-        # Count correct responses
-        correct_results = [result for result in eval_results if result.get("correct", False)]
-        correct_count = len(correct_results)
-
-        if correct_count == 0:
-            # No correct responses - return the first one
-            return eval_results[0], responses[0]
-        elif correct_count == 1:
-            # One correct response - use it
-            correct_idx = next(i for i, result in enumerate(eval_results) if result.get("correct", False))
-            return eval_results[correct_idx], responses[correct_idx]
-        else:
-            # Multiple correct responses - use majority voting on predicted answers
-            return self._majority_vote_responses(sample, responses, eval_results)
-
-    def _majority_vote_responses(
-        self,
-        sample: EvaluationSample,
-        responses: List[str],
-        eval_results: List[Dict[str, Any]]
-    ) -> Tuple[Dict[str, Any], str]:
-        """
-        Use majority voting to select the best response.
-        """
-        from collections import Counter
-
-        # Count predicted answers
-        predicted_answers = []
-        for result in eval_results:
-            if result.get("correct", False):
-                predicted_answers.append(result.get("predicted", ""))
-
-        if not predicted_answers:
-            # No correct predictions - return first response
-            return eval_results[0], responses[0]
-
-        # Find most common correct answer
-        answer_counts = Counter(predicted_answers)
-        most_common_answer = answer_counts.most_common(1)[0][0]
-
-        # Find the first response that gave this answer
-        for i, result in enumerate(eval_results):
-            if result.get("predicted") == most_common_answer and result.get("correct", False):
-                # Enhance the result with majority voting info
-                enhanced_result = result.copy()
-                enhanced_result["majority_vote_count"] = answer_counts[most_common_answer]
-                enhanced_result["total_responses"] = len(responses)
-                enhanced_result["correct_responses"] = len([r for r in eval_results if r.get("correct", False)])
-                return enhanced_result, responses[i]
-
-        # Fallback - return first correct response
-        correct_idx = next(i for i, result in enumerate(eval_results) if result.get("correct", False))
-        return eval_results[correct_idx], responses[correct_idx]
 
     async def run_evaluation(
         self,
@@ -202,36 +132,46 @@ class BaseBenchmark(ABC):
                         responses = [result[0] for result in response_results]
                         eval_results = [result[1] for result in response_results]
 
-                    # Combine multiple responses using the appropriate strategy
+                    # Handle multiple responses as separate samples
                     if num_responses == 1:
                         # Single response - use as-is
                         final_eval_result = eval_results[0]
                         best_response = responses[0]
+
+                        # Create prediction data for saving
+                        prediction_data = None
+                        if save_predictions:
+                            prediction_data = {
+                                "id": sample.id,
+                                "input": sample.input_text,
+                                "expected": sample.expected_output,
+                                "predicted": best_response,
+                                "evaluation": final_eval_result,
+                                "metadata": sample.metadata
+                            }
+
+                        return i, [final_eval_result], [prediction_data] if save_predictions else [None]
                     else:
-                        # Multiple responses - use majority voting or best response
-                        final_eval_result, best_response = self._combine_responses(
-                            sample, responses, eval_results
-                        )
+                        # Multiple responses - treat each as a separate sample
+                        prediction_data_list = []
+                        if save_predictions:
+                            for response_idx, (response, eval_result) in enumerate(zip(responses, eval_results)):
+                                prediction_data = {
+                                    "id": f"{sample.id}_response_{response_idx + 1}",
+                                    "original_id": sample.id,
+                                    "response_index": response_idx + 1,
+                                    "total_responses": num_responses,
+                                    "input": sample.input_text,
+                                    "expected": sample.expected_output,
+                                    "predicted": response,
+                                    "evaluation": eval_result,
+                                    "metadata": sample.metadata
+                                }
+                                prediction_data_list.append(prediction_data)
+                        else:
+                            prediction_data_list = [None] * num_responses
 
-                    # Create prediction data for saving
-                    prediction_data = None
-                    if save_predictions:
-                        prediction_data = {
-                            "id": sample.id,
-                            "input": sample.input_text,
-                            "expected": sample.expected_output,
-                            "predicted": best_response,
-                            "evaluation": final_eval_result,
-                            "metadata": sample.metadata
-                        }
-
-                        # Add all responses if multiple were generated
-                        if num_responses > 1:
-                            prediction_data["all_responses"] = responses
-                            prediction_data["all_evaluations"] = eval_results
-                            prediction_data["num_responses"] = num_responses
-
-                    return i, final_eval_result, prediction_data
+                        return i, eval_results, prediction_data_list
 
                 except Exception as e:
                     error_msg = f"Error processing sample {sample.id}: {e}"
@@ -251,15 +191,15 @@ class BaseBenchmark(ABC):
                         "error_type": error_type,
                         "score": 0.0
                     }
-                    return i, failed_result, None
+                    return i, [failed_result], [None]
 
         # Process all samples concurrently
         logger.info("Starting concurrent processing...")
         tasks = [process_sample(i, sample) for i, sample in enumerate(samples)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results and maintain order
-        sample_results = [None] * len(samples)
+        # Process results and flatten multiple responses into individual samples
+        sample_results = []
         predictions = []
 
         for result in results:
@@ -273,14 +213,16 @@ class BaseBenchmark(ABC):
                     "score": 0.0
                 })
             else:
-                index, eval_result, prediction_data = result
-                sample_results[index] = eval_result
+                index, eval_results_list, prediction_data_list = result
 
-                if prediction_data:
-                    predictions.append(prediction_data)
+                # Add each evaluation result as a separate sample
+                for eval_result in eval_results_list:
+                    sample_results.append(eval_result)
 
-        # Filter out None results (shouldn't happen, but be safe)
-        sample_results = [r for r in sample_results if r is not None]
+                # Add each prediction data (if not None)
+                for prediction_data in prediction_data_list:
+                    if prediction_data:
+                        predictions.append(prediction_data)
 
         logger.info(f"Completed processing {len(sample_results)} samples")
 
@@ -288,12 +230,21 @@ class BaseBenchmark(ABC):
         aggregated = self.aggregate_results(sample_results)
 
         # Create evaluation result
+        # Update num_samples to reflect actual samples evaluated (including multiple responses)
+        original_samples_count = len(samples)
+        total_evaluated_samples = len(sample_results)
+
         result = EvaluationResult(
             benchmark_name=self.name,
             model_name=model_name,
             score=aggregated.get("overall_score", 0.0),
-            details=aggregated,
-            num_samples=len(samples),
+            details={
+                **aggregated,
+                "original_samples": original_samples_count,
+                "responses_per_sample": num_responses,
+                "total_evaluated_samples": total_evaluated_samples
+            },
+            num_samples=total_evaluated_samples,  # Total evaluated samples (original * num_responses)
             timestamp=datetime.now(),
             config=self.config
         )
@@ -376,16 +327,38 @@ class MultipleChoiceBenchmark(BaseBenchmark):
         }
 
     def aggregate_results(self, sample_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate multiple choice results."""
+        """Aggregate multiple choice results, excluding inference failures."""
         total_samples = len(sample_results)
-        correct_samples = sum(1 for r in sample_results if r.get("correct", False))
 
-        accuracy = correct_samples / total_samples if total_samples > 0 else 0.0
+        # Separate successful and failed samples
+        successful_samples = [r for r in sample_results if not r.get("error")]
+        failed_samples = [r for r in sample_results if r.get("error")]
+
+        # Count correct among successful samples
+        correct_samples = sum(1 for r in successful_samples if r.get("correct", False))
+        successful_count = len(successful_samples)
+        failed_count = len(failed_samples)
+
+        # Calculate accuracy based on successful samples only
+        accuracy = correct_samples / successful_count if successful_count > 0 else 0.0
+
+        # Categorize failure types
+        failure_types = {}
+        for failed in failed_samples:
+            error_type = failed.get("error_type", "unknown_error")
+            failure_types[error_type] = failure_types.get(error_type, 0) + 1
 
         return {
             "overall_score": accuracy,
             "accuracy": accuracy,
             "correct": correct_samples,
-            "total": total_samples,
-            "error_rate": 1.0 - accuracy
+            "successful_samples": successful_count,
+            "failed_samples": failed_count,
+            "total_samples": total_samples,
+            "success_rate": successful_count / total_samples if total_samples > 0 else 0.0,
+            "failure_rate": failed_count / total_samples if total_samples > 0 else 0.0,
+            "error_rate": 1.0 - accuracy,  # Among successful samples
+            "failure_types": failure_types,
+            # Legacy fields for compatibility
+            "total": successful_count  # For backward compatibility, use successful count
         }

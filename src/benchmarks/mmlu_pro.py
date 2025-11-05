@@ -158,12 +158,19 @@ class MMLUProBenchmark(MultipleChoiceBenchmark):
         return "UNKNOWN"
 
     def aggregate_results(self, sample_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate MMLU-Pro results with subject breakdown."""
+        """Aggregate MMLU-Pro results with subject breakdown, excluding failed samples."""
         base_results = super().aggregate_results(sample_results)
+
+        # Only process successful samples for subject analysis
+        successful_samples = [r for r in sample_results if not r.get("error")]
+        failed_samples = [r for r in sample_results if r.get("error")]
 
         # Add subject-specific analysis if metadata is available
         subject_stats = {}
-        for result in sample_results:
+        subject_failures = {}
+
+        # Process successful samples
+        for result in successful_samples:
             if "metadata" in result:
                 subject = result["metadata"].get("subject", "unknown")
                 if subject not in subject_stats:
@@ -173,19 +180,42 @@ class MMLUProBenchmark(MultipleChoiceBenchmark):
                 if result.get("correct", False):
                     subject_stats[subject]["correct"] += 1
 
-        # Calculate per-subject accuracy
+        # Process failed samples by subject
+        for result in failed_samples:
+            if "metadata" in result:
+                subject = result["metadata"].get("subject", "unknown")
+                if subject not in subject_failures:
+                    subject_failures[subject] = {"failed": 0, "total_attempted": 0}
+
+                subject_failures[subject]["failed"] += 1
+                subject_failures[subject]["total_attempted"] += 1
+
+        # Calculate per-subject accuracy (among successful samples only)
         subject_accuracy = {}
         for subject, stats in subject_stats.items():
             accuracy = stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+
+            # Add failure information if any
+            failure_info = subject_failures.get(subject, {"failed": 0, "total_attempted": 0})
+            total_attempted = stats["total"] + failure_info["failed"]
+
             subject_accuracy[subject] = {
-                "accuracy": accuracy,
+                "accuracy": accuracy,  # Among successful samples
                 "correct": stats["correct"],
-                "total": stats["total"]
+                "successful": stats["total"],
+                "failed": failure_info["failed"],
+                "total_attempted": total_attempted,
+                "success_rate": stats["total"] / total_attempted if total_attempted > 0 else 0.0
             }
+
+        # Add overall subject statistics
+        total_subjects_with_failures = len(set(list(subject_stats.keys()) + list(subject_failures.keys())))
 
         base_results.update({
             "subjects": subject_accuracy,
-            "num_subjects": len(subject_accuracy)
+            "num_subjects": len(subject_accuracy),
+            "total_subjects_attempted": total_subjects_with_failures,
+            "subjects_with_failures": len(subject_failures)
         })
 
         return base_results

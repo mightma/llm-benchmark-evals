@@ -223,31 +223,53 @@ class IFEvalBenchmark(BaseBenchmark):
         }
 
     def aggregate_results(self, sample_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate IFEval results."""
+        """Aggregate IFEval results, excluding inference failures."""
         total_samples = len(sample_results)
-        total_instructions = sum(r.get("num_instructions", 0) for r in sample_results)
-        total_instructions_passed = sum(r.get("instructions_passed", 0) for r in sample_results)
 
-        # Overall accuracy (samples with all instructions followed)
-        perfect_samples = sum(1 for r in sample_results if r.get("correct", False))
-        sample_accuracy = perfect_samples / total_samples if total_samples > 0 else 0.0
+        # Separate successful and failed samples
+        successful_samples = [r for r in sample_results if not r.get("error")]
+        failed_samples = [r for r in sample_results if r.get("error")]
 
-        # Instruction-level accuracy
+        successful_count = len(successful_samples)
+        failed_count = len(failed_samples)
+
+        # Calculate statistics only for successful samples
+        total_instructions = sum(r.get("num_instructions", 0) for r in successful_samples)
+        total_instructions_passed = sum(r.get("instructions_passed", 0) for r in successful_samples)
+
+        # Overall accuracy (samples with all instructions followed) - among successful samples
+        perfect_samples = sum(1 for r in successful_samples if r.get("correct", False))
+        sample_accuracy = perfect_samples / successful_count if successful_count > 0 else 0.0
+
+        # Instruction-level accuracy - among successful samples
         instruction_accuracy = total_instructions_passed / total_instructions if total_instructions > 0 else 0.0
 
-        # Average sample score
-        avg_sample_score = sum(r.get("score", 0.0) for r in sample_results) / total_samples if total_samples > 0 else 0.0
+        # Average sample score - among successful samples
+        avg_sample_score = sum(r.get("score", 0.0) for r in successful_samples) / successful_count if successful_count > 0 else 0.0
+
+        # Categorize failure types
+        failure_types = {}
+        for failed in failed_samples:
+            error_type = failed.get("error_type", "unknown_error")
+            failure_types[error_type] = failure_types.get(error_type, 0) + 1
 
         return {
             "overall_score": instruction_accuracy,  # Use instruction accuracy as main score
-            "sample_accuracy": sample_accuracy,
-            "instruction_accuracy": instruction_accuracy,
-            "average_sample_score": avg_sample_score,
+            "sample_accuracy": sample_accuracy,  # Among successful samples
+            "instruction_accuracy": instruction_accuracy,  # Among successful samples
+            "average_sample_score": avg_sample_score,  # Among successful samples
             "perfect_samples": perfect_samples,
+            "successful_samples": successful_count,
+            "failed_samples": failed_count,
             "total_samples": total_samples,
+            "success_rate": successful_count / total_samples if total_samples > 0 else 0.0,
+            "failure_rate": failed_count / total_samples if total_samples > 0 else 0.0,
             "total_instructions": total_instructions,
             "instructions_passed": total_instructions_passed,
-            "instructions_failed": total_instructions - total_instructions_passed
+            "instructions_failed": total_instructions - total_instructions_passed,
+            "failure_types": failure_types,
+            # Statistics about instructions in failed samples (if any metadata available)
+            "instructions_in_failed_samples": sum(r.get("num_instructions", 0) for r in failed_samples)
         }
 
     # Instruction checker functions

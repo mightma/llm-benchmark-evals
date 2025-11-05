@@ -34,6 +34,46 @@ class EvaluationRunner:
         with open(self.config_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
 
+    def override_model(self, model: str) -> None:
+        """Override the model configuration and reinitialize server manager.
+
+        Args:
+            model: Model identifier (HuggingFace model ID or local path)
+        """
+        # Update model configuration
+        models = self.config.get('models', [])
+        if models:
+            # Preserve existing model configuration but override the model field
+            original_config = models[0].copy()
+            original_config['model'] = model
+            # Remove legacy fields if present
+            original_config.pop('model_path', None)
+            original_config.pop('name', None)
+            models[0] = original_config
+            self.config['models'] = models
+        else:
+            # Create new model configuration if none exists
+            self.config['models'] = [{
+                'model': model,
+                'gpu_memory_utilization': 0.9,  # Default values
+                'max_model_len': 32768,
+                'quantization': None
+            }]
+
+        # Reinitialize server manager with updated config
+        self.server_manager = VLLMServerManager(self.config)
+
+        logger.info(f"Model configuration overridden to: {model}")
+
+        # Validate the override worked
+        updated_models = self.config.get('models', [])
+        if updated_models:
+            actual_model = updated_models[0].get('model')
+            if actual_model != model:
+                logger.error(f"Model override failed! Expected: {model}, Got: {actual_model}")
+            else:
+                logger.info(f"Model override confirmed: {actual_model}")
+
     def _initialize_benchmarks(self):
         """Initialize benchmark instances."""
         benchmark_config = self.config.get("benchmarks", {})
@@ -73,6 +113,18 @@ class EvaluationRunner:
 
     async def start_server(self) -> str:
         """Start the VLLM server."""
+        # Show which model will be deployed
+        models = self.config.get('models', [])
+        if models:
+            model_info = models[0]
+            model = model_info.get('model') or model_info.get('model_path')  # Support legacy config
+            if model:
+                logger.info(f"Starting VLLM server with model: {model}")
+            else:
+                raise ValueError("Model configuration missing 'model' field")
+        else:
+            logger.warning("No model configuration found!")
+
         logger.info("Starting VLLM server...")
         server_url = await self.server_manager.start_server()
 
@@ -119,14 +171,21 @@ class EvaluationRunner:
             client_to_use = self.inference_client
 
         try:
+            # Use the actual server model name to ensure consistency
+            server_model_name = client_to_use.get_server_model_name()
+            logger.debug(f"Using server model name '{server_model_name}' for evaluation (requested: '{model_name}')")
+
             result = await benchmark.run_evaluation(
                 inference_client=client_to_use,
-                model_name=model_name,
+                model_name=server_model_name,  # Use server's actual model name for inference
                 num_samples=num_samples,
                 num_responses=num_responses,
                 save_predictions=evaluation_config.get("save_predictions", True),
                 output_dir=evaluation_config.get("output_dir", "results")
             )
+
+            # Update result to use display name for user-facing model name
+            result.model_name = model_name  # Use the user-requested model name for display
             return result
         finally:
             if inference_params and client_to_use != self.inference_client:

@@ -51,7 +51,7 @@ def cli(ctx, config, verbose):
 
 
 @cli.command()
-@click.option('--model', '-m', help='Model name to use (overrides config)')
+@click.option('--model', '-m', help='Model path to use (overrides config model_path, e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507")')
 @click.option('--benchmark', '-b', help='Specific benchmark to run (mmlu_pro, aime25, ifeval)')
 @click.option('--num-samples', '-n', type=int, help='Number of samples to evaluate')
 @click.option('--num-responses', type=int, default=1, help='Number of responses to generate per question (for self-consistency)')
@@ -64,7 +64,14 @@ def cli(ctx, config, verbose):
 @click.option('--run-id', help='Custom run ID for saving results')
 @click.pass_context
 def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, temperature, top_p, top_k, max_tokens, output_dir, run_id):
-    """Run evaluation on specified benchmarks."""
+    """Run evaluation on specified benchmarks.
+
+    The --model argument will override the model_path in your config file, allowing you to
+    evaluate different models without modifying the config. For example:
+
+    python main.py evaluate --model "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    python main.py evaluate --model "microsoft/DialoGPT-medium" --benchmark mmlu_pro
+    """
 
     async def run_evaluation():
         config_path = ctx.obj['config']
@@ -76,6 +83,11 @@ def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, 
         # Initialize runner
         runner = EvaluationRunner(config_path)
 
+        # Override model configuration if --model is provided
+        if model:
+            runner.override_model(model)
+            console.print(f"[green]Model overridden: {model}[/green]")
+
         # Override max_concurrent if provided
         if max_concurrent is not None:
             if "evaluation" not in runner.config:
@@ -84,16 +96,21 @@ def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, 
             # Reinitialize benchmarks with updated config
             runner._initialize_benchmarks()
 
-        # Get model name
+        # Get model name for display/results
         if not model:
             models = runner.config.get('models', [])
             if models:
-                model_name = models[0].get('name', 'default')
+                configured_model = models[0].get('model') or models[0].get('model_path')  # Support legacy config
+                if configured_model:
+                    model_name = configured_model.split('/')[-1] if '/' in configured_model else configured_model
+                else:
+                    console.print("[red]No model configured in config file[/red]")
+                    return
             else:
                 console.print("[red]No model specified and none found in config[/red]")
                 return
         else:
-            model_name = model
+            model_name = model.split('/')[-1] if '/' in model else model
 
         # Validate inference parameters
         inference_params = {}
@@ -333,28 +350,96 @@ def parameters():
 
 
 def display_results(results):
-    """Display evaluation results in a formatted table."""
+    """Display evaluation results in a formatted table with failure statistics."""
     table = Table(title="Evaluation Results")
     table.add_column("Benchmark", style="cyan")
     table.add_column("Score", style="magenta")
-    table.add_column("Samples", style="green")
+    table.add_column("Success/Total", style="green")
+    table.add_column("Accuracy", style="blue")
+    table.add_column("Failures", style="red")
     table.add_column("Details", style="yellow")
 
     for result in results:
         details = []
-        if 'accuracy' in result.details:
-            details.append(f"Acc: {result.details['accuracy']:.4f}")
-        if 'correct' in result.details and 'total' in result.details:
-            details.append(f"{result.details['correct']}/{result.details['total']}")
+
+        # Get success/failure statistics
+        successful = result.details.get('successful_samples', result.details.get('total', 0))
+        failed = result.details.get('failed_samples', 0)
+        total_samples = result.details.get('total_samples', result.num_samples)
+        accuracy = result.details.get('accuracy', 0.0)
+
+        # Handle multiple responses display
+        original_samples = result.details.get('original_samples', total_samples)
+        responses_per_sample = result.details.get('responses_per_sample', 1)
+
+        # Success rate information
+        success_info = f"{successful}/{total_samples}"
+        if failed > 0:
+            success_rate = result.details.get('success_rate', successful / total_samples if total_samples > 0 else 0.0)
+            success_info += f" ({success_rate:.1%})"
+
+        # Failure information
+        failure_info = "None"
+        if failed > 0:
+            failure_rate = result.details.get('failure_rate', failed / total_samples if total_samples > 0 else 0.0)
+            failure_info = f"{failed} ({failure_rate:.1%})"
+
+            # Add failure types if available
+            failure_types = result.details.get('failure_types', {})
+            if failure_types:
+                failure_breakdown = []
+                for error_type, count in failure_types.items():
+                    failure_breakdown.append(f"{error_type}: {count}")
+                failure_info += f" [{', '.join(failure_breakdown)}]"
+
+        # Additional details
+        if 'correct' in result.details:
+            details.append(f"Correct: {result.details['correct']}")
+
+        # Multiple responses information
+        if responses_per_sample > 1:
+            details.append(f"Responses/sample: {responses_per_sample}")
+            details.append(f"Original samples: {original_samples}")
+
+        # Benchmark-specific details
+        if result.benchmark_name == "mmlu_pro" and 'num_subjects' in result.details:
+            details.append(f"Subjects: {result.details['num_subjects']}")
+        elif result.benchmark_name == "aime25":
+            details.append(f"Problems solved: {result.details.get('problems_solved', 0)}")
+        elif result.benchmark_name == "ifeval":
+            if 'instruction_accuracy' in result.details:
+                details.append(f"Inst Acc: {result.details['instruction_accuracy']:.4f}")
+            if 'total_instructions' in result.details:
+                details.append(f"Instructions: {result.details.get('instructions_passed', 0)}/{result.details['total_instructions']}")
 
         table.add_row(
             result.benchmark_name,
             f"{result.score:.4f}",
-            str(result.num_samples),
+            success_info,
+            f"{accuracy:.4f}",
+            failure_info,
             ", ".join(details) if details else "N/A"
         )
 
     console.print(table)
+
+    # Print summary of failures if any
+    total_failures = sum(result.details.get('failed_samples', 0) for result in results)
+    if total_failures > 0:
+        console.print(f"\n[red]⚠️  Total inference failures: {total_failures}[/red]")
+        console.print("[red]Note: Accuracy calculations exclude failed samples[/red]")
+
+        # Aggregate failure types across all benchmarks
+        all_failure_types = {}
+        for result in results:
+            failure_types = result.details.get('failure_types', {})
+            for error_type, count in failure_types.items():
+                all_failure_types[error_type] = all_failure_types.get(error_type, 0) + count
+
+        if all_failure_types:
+            console.print(f"[red]Failure breakdown: {', '.join(f'{error_type}: {count}' for error_type, count in all_failure_types.items())}[/red]")
+    else:
+        console.print(f"\n[green]✅ All samples processed successfully[/green]")
 
 
 def display_comparison_table(comparison):
