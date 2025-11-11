@@ -56,6 +56,7 @@ def cli(ctx, config, verbose):
 @click.option('--num-samples', '-n', type=int, help='Number of samples to evaluate')
 @click.option('--num-responses', type=int, default=1, help='Number of responses to generate per question (for self-consistency)')
 @click.option('--max-concurrent', type=int, help='Maximum number of concurrent requests (overrides config)')
+@click.option('--max-concurrent-responses', type=int, help='Maximum concurrent responses when num_responses > 1 (overrides config)')
 @click.option('--temperature', '-t', type=float, help='Temperature for generation')
 @click.option('--top-p', type=float, help='Top-p for nucleus sampling')
 @click.option('--top-k', type=int, help='Top-k for sampling')
@@ -64,7 +65,7 @@ def cli(ctx, config, verbose):
 @click.option('--output-dir', '-o', default='results', help='Output directory for results')
 @click.option('--run-id', help='Custom run ID for saving results')
 @click.pass_context
-def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, temperature, top_p, top_k, max_tokens, presence_penalty, output_dir, run_id):
+def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, max_concurrent_responses, temperature, top_p, top_k, max_tokens, presence_penalty, output_dir, run_id):
     """Run evaluation on specified benchmarks.
 
     The --model argument will override the model_path in your config file, allowing you to
@@ -96,6 +97,13 @@ def evaluate(ctx, model, benchmark, num_samples, num_responses, max_concurrent, 
             runner.config["evaluation"]["max_concurrent"] = max_concurrent
             # Reinitialize benchmarks with updated config
             runner._initialize_benchmarks()
+
+        # Override max_concurrent_responses if provided
+        if max_concurrent_responses is not None:
+            if "inference" not in runner.config:
+                runner.config["inference"] = {}
+            runner.config["inference"]["max_concurrent_responses"] = max_concurrent_responses
+            console.print(f"[green]Max concurrent responses overridden: {max_concurrent_responses}[/green]")
 
         # Get model name for display/results
         if not model:

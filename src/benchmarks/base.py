@@ -114,18 +114,28 @@ class BaseBenchmark(ABC):
                         eval_result = await self.evaluate_sample(sample, model_output)
                         eval_results.append(eval_result)
                     else:
-                        # Multiple responses - generate concurrently
-                        async def generate_single_response(response_idx: int):
-                            logger.debug(f"Generating response {response_idx+1}/{num_responses} for sample {sample.id}")
-                            response = await inference_client.generate(
-                                prompt=sample.input_text,
-                                model_name=model_name
-                            )
-                            model_output = response["choices"][0]["message"]["content"]
-                            eval_result = await self.evaluate_sample(sample, model_output)
-                            return model_output, eval_result
+                        # Multiple responses - generate with throttling to prevent server congestion
+                        # Get max concurrent responses from config, default to 10
+                        config_max_concurrent = self.config.get("inference", {}).get("max_concurrent_responses", 10)
+                        max_concurrent_responses = min(num_responses, config_max_concurrent)
 
-                        # Generate multiple responses concurrently
+                        if max_concurrent_responses < num_responses:
+                            logger.info(f"Throttling {num_responses} responses to max {max_concurrent_responses} concurrent requests for sample {sample.id}")
+
+                        response_semaphore = asyncio.Semaphore(max_concurrent_responses)
+
+                        async def generate_single_response(response_idx: int):
+                            async with response_semaphore:  # Throttle concurrent requests
+                                logger.debug(f"Generating response {response_idx+1}/{num_responses} for sample {sample.id}")
+                                response = await inference_client.generate(
+                                    prompt=sample.input_text,
+                                    model_name=model_name
+                                )
+                                model_output = response["choices"][0]["message"]["content"]
+                                eval_result = await self.evaluate_sample(sample, model_output)
+                                return model_output, eval_result
+
+                        # Generate multiple responses with throttling
                         response_tasks = [generate_single_response(idx) for idx in range(num_responses)]
                         response_results = await asyncio.gather(*response_tasks)
 

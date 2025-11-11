@@ -26,6 +26,8 @@ inference:
   max_tokens: 32768
   repetition_penalty: 1.0
   presence_penalty: null   # Presence penalty for inference (null = use default, range: -2.0 to 2.0)
+  # Multiple responses settings
+  max_concurrent_responses: 4  # Maximum concurrent responses when num_responses > 1
   # HTTP request retry settings
   max_retries: 3           # Number of retries for failed requests
   retry_delay: 2.0         # Initial delay between retries (seconds)
